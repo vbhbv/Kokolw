@@ -15,7 +15,7 @@ TEMP_RESULTS_KEY = "current_search_results"
 
 
 # ----------------------------------------------------------------------
-# --- دالة البحث داخل القناة (V17.3) ---
+# --- دالة البحث داخل القناة (V17.4: الرجوع لاسم الدالة القديم) ---
 # ----------------------------------------------------------------------
 async def search_telegram_channel(context, chat_id, query: str):
     
@@ -24,10 +24,10 @@ async def search_telegram_channel(context, chat_id, query: str):
         return []
 
     try:
-        # 💥 V17.3: استخدام الدالة الصحيحة search_for_messages
-        messages = await context.bot.search_for_messages(
+        # 💥 V17.4: الرجوع إلى اسم الدالة القديم search_messages كحل أخير لخطأ البيئة.
+        messages = await context.bot.search_messages(
             chat_id=CHANNEL_ID,
-            query=query, 
+            text=query, # نستخدم text بدلاً من query في الدوال القديمة
             limit=5  
         )
         
@@ -53,7 +53,7 @@ async def search_telegram_channel(context, chat_id, query: str):
             await context.bot.send_message(chat_id=chat_id, text=f"❌ خطأ تيليجرام: {e}")
         return []
     except Exception as e:
-        # هذا الخطأ لم يعد يحدث في بيئة 20.8 الصحيحة
+        # إذا استمر الخطأ حتى بعد هذا التغيير، فالمشكلة بيئية بحتة.
         await context.bot.send_message(chat_id=chat_id, text=f"⚠️ خطأ عام أثناء البحث: {e}")
         return []
 
@@ -80,7 +80,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("✅ جارٍ إرسال الكتاب...")
         
         try:
-            # إعادة توجيه الرسالة مباشرة من القناة إلى المستخدم
             await context.bot.forward_message(
                 chat_id=chat_id,
                 from_chat_id=CHANNEL_ID, 
