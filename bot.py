@@ -1,8 +1,8 @@
 import os
 import asyncio
 from telethon import TelegramClient, events
-from telethon.tl.custom import Button
-from telethon.errors.rpcerrorlist import ChatAdminRequiredError, PeerIdInvalidError, MessageNotModifiedError, AccessTokenInvalidError
+from telethon.tl.types import InputWebDocument, InputBotInlineResult, InputBotInlineMessageMediaAuto, InlineQueryResult, InlineQueryResultArticle
+from telethon.errors.rpcerrorlist import ChatAdminRequiredError, PeerIdInvalidError
 
 # --- إعدادات البوت والثوابت ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -16,122 +16,149 @@ CHANNEL_ID = "@books921383837"
 bot = TelegramClient('bot_session', int(API_ID), API_HASH)
 
 # ----------------------------------------------------------------------
-# --- دالة البحث (V19.2: تخفيف حدة الطلب) ---
+# --- دالة البحث (Telethon) - بقيت كما هي ---
 # ----------------------------------------------------------------------
+# هذه الدالة كانت تسبب خطأ القيد، لكننا سنحاول استخدامها هنا
+# لأن البحث المضمن قد يعطيها صلاحيات مختلفة.
 async def search_channel(client, query):
     
     results = []
-    
     try:
-        # 💥 V19.2: نجرب استخدام الدالة مع filter/offset بدلاً من search
-        # ولكن بما أننا لا نستطيع استخدام فلترة محددة، فإننا نعود إلى الصيغة الأساسية 
-        # (الصيغة الأساسية هي التي تسبب الخطأ، لكننا نتركها ونركز على الخطأ الأخير)
-        
         messages = await client.get_messages(
             CHANNEL_ID,
-            search=query, # نتركها هكذا لأن أي تغيير آخر سيعطل الوظيفة
+            search=query,
             limit=5  
         )
-        
-        # ... (بقية منطق تجميع النتائج بدون تغيير) ...
         for msg in messages:
             if msg and (msg.file or msg.photo or msg.video):
-                message_text = msg.text if msg.text else "رسالة بدون عنوان"
+                message_text = msg.text if msg.text else (msg.file.name if msg.file else "رسالة بدون عنوان")
                 
                 results.append({
                     "message_id": msg.id, 
                     "title": message_text[:100].replace('\n', ' ')
                 })
 
-    except ChatAdminRequiredError:
-        return "ERROR_ADMIN_REQUIRED"
-    except PeerIdInvalidError:
-        return "ERROR_INVALID_ID"
-    except AccessTokenInvalidError:
-        return "ERROR_INVALID_BOT_TOKEN"
     except Exception as e:
-        # إذا ظهر الخطأ "The method you tried to invoke cannot be executed as a bot" مرة أخرى
         if "cannot be executed as a bot" in str(e):
              return "ERROR_BOT_RESTRICTION"
         return f"ERROR_GENERAL:{e}"
-
+    
     return results
 
 # ----------------------------------------------------------------------
-# --- بقية الكود (معالجات الأوامر والتشغيل) بدون تغيير جوهري ---
+# --- معالج أمر /start (بدون تغيير) ---
 # ----------------------------------------------------------------------
 @bot.on(events.NewMessage(pattern='/start'))
 async def handle_start(event):
     await event.reply(
         "📚 بوت المكتبة الداخلية جاهز!\n"
-        "أرسل /search متبوعًا باسم الكتاب للبحث داخل قناة المكتبة المحددة."
+        "للبحث، استخدم البحث المضمن (Inline Search) في أي محادثة، على النحو التالي:\n"
+        "`@yourbotusername اسم الكتاب`"
     )
 
-@bot.on(events.NewMessage(pattern='/search (.+)'))
-async def handle_search(event):
-    query = event.pattern_match.group(1).strip()
-
+# ----------------------------------------------------------------------
+# --- 💥 V20.0: معالج البحث المضمن (Inline Query) ---
+# ----------------------------------------------------------------------
+@bot.on(events.InlineQuery)
+async def handle_inline_query(event):
+    query = event.text
+    
     if not query:
-        await event.reply("استخدم: /search اسم الكتاب أو المؤلف")
+        # إذا كانت الاستعلام فارغة، قدم رسالة تعليمية
+        await event.answer([
+            InlineQueryResultArticle(
+                title="🔍 ابدأ البحث",
+                description="أدخل اسم الكتاب أو المؤلف للبحث في المكتبة.",
+                input_message=InputBotInlineMessageMediaAuto("الرجاء إدخال نص البحث.")
+            )
+        ])
         return
+    
+    # تنفيذ البحث (نستخدم نفس الدالة التي كانت تسبب خطأ القيد)
+    search_results = await search_channel(bot, query)
+    
+    if isinstance(search_results, str):
+        # معالجة أخطاء البحث داخل Inline
+        title = "❌ فشل البحث"
+        description = "حدث خطأ في الوصول للقناة أو بسبب قيود تيليجرام."
+        if "ERROR_BOT_RESTRICTION" in search_results:
+             description = "البحث العميق محظور على البوتات. الرجاء التأكد من صلاحيات البوت."
         
-    msg = await event.reply(f"🔍 أبحث عن **{query}** داخل المكتبة المحددة...")
-    
-    results = await search_channel(bot, query)
-
-    if isinstance(results, str) and results.startswith("ERROR_"):
-         error_map = {
-             "ERROR_ADMIN_REQUIRED": "❌ خطأ: البوت ليس مشرفاً (Admin) في القناة المحددة.",
-             "ERROR_INVALID_ID": "❌ خطأ: معرف القناة غير صالح. تأكد من صحة @channelusername.",
-             "ERROR_BOT_RESTRICTION": "❌ **قيد API:** لا يسمح تيليجرام للبوتات بالبحث العميق في القنوات. الحل: يجب استخدام 'Inline Search' أو تشغيل البوت كعميل مستخدم.",
-             "ERROR_INVALID_BOT_TOKEN": "❌ خطأ: توكن البوت غير صحيح.",
-         }
-         await msg.edit(error_map.get(results, f"⚠️ خطأ عام أثناء البحث: {results}"))
-         return
-
-    if not results:
-        await msg.edit("❌ لم يتم العثور على نتائج في المكتبة الداخلية. حاول بكلمات مختلفة.")
+        await event.answer([
+             InlineQueryResultArticle(
+                title=title,
+                description=description,
+                input_message=InputBotInlineMessageMediaAuto(description)
+            )
+        ])
         return
 
-    buttons = []
-    text_lines = []
-    
-    for i, item in enumerate(results, start=0):
-        title = item.get("title")
-        text_lines.append(f"{i+1}. {title}")
-        buttons.append([Button.inline(f"📥 تحميل {i+1}", data=f"dl|{item['message_id']}")]) 
+    if not search_results:
+        await event.answer([
+            InlineQueryResultArticle(
+                title="❌ لا توجد نتائج",
+                description=f"لم يتم العثور على '{query}' في المكتبة.",
+                input_message=InputBotInlineMessageMediaAuto(f"لم يتم العثور على '{query}'.")
+            )
+        ])
+        return
 
-    reply_text = "✅ تم العثور على الكتب التالية:\n" + "\n".join(text_lines)
-    
-    await msg.edit(reply_text, buttons=buttons, parse_mode='markdown')
+    # بناء نتائج Inline
+    results = []
+    for item in search_results:
+        
+        # لـ Inline Search، يجب أن تكون النتيجة هي رسالة يمكن إرسالها.
+        # هنا سننشئ نتيجة ترسل رسالة تحتوي على الكتاب (عن طريق إعادة توجيه الرسالة).
+        # هذا الجزء معقد لأنه لا يمكن إعادة توجيه ملف مباشرة في نتيجة Inline.
+        # الحل الأسهل هو إرسال رابط توجيه إلى البوت.
+        
+        # نستخدم رسالة Article التي تطلب من المستخدم الضغط للذهاب إلى البوت
+        results.append(
+            InlineQueryResultArticle(
+                title=item['title'],
+                description="اضغط للتحميل المباشر",
+                # النص الذي سيظهر بعد اختيار النتيجة
+                input_message=InputBotInlineMessageMediaAuto(
+                    f"✅ تم العثور على '{item['title']}'. لتحميل الكتاب، اضغط على الزر أدناه."
+                ),
+                # الزر الذي يظهر أسفل النتيجة
+                reply_markup=bot.build_reply_markup([
+                    [Button.url('📥 تحميل مباشر', f'https://t.me/yourbotusername?start=get_{item["message_id"]}')]
+                ])
+            )
+        )
+        
+    await event.answer(results)
 
-@bot.on(events.CallbackQuery(data=lambda d: d.startswith(b'dl|')))
-async def handle_callback(event):
-    
-    data = event.data.decode('utf-8')
+# ----------------------------------------------------------------------
+# --- معالج الأوامر العميقة (Deep Linking) للتحميل ---
+# ----------------------------------------------------------------------
+@bot.on(events.NewMessage(pattern='/start get_(\d+)'))
+async def handle_deep_link_download(event):
+    # يستخدم هذا المعالج عندما يضغط المستخدم على زر التحميل في Inline Result
     try:
-        message_id_to_forward = int(data.split('|')[1])
+        message_id_to_forward = int(event.pattern_match.group(1))
     except:
-        await event.answer("⚠️ بيانات تحميل غير صالحة.")
+        await event.reply("❌ رابط تحميل غير صالح.")
         return
 
+    await event.reply("✅ جارٍ إرسال الكتاب...")
+    
     try:
-        await event.edit("✅ جارٍ إرسال الكتاب...")
-    except MessageNotModifiedError:
-        pass 
-
-    try:
+        # إعادة توجيه الرسالة مباشرة
         await bot.forward_messages(
             event.chat_id, 
             message_id_to_forward, 
             CHANNEL_ID
         )
-        await event.delete() 
         
     except Exception as e:
-        await event.respond(f"❌ فشل إعادة توجيه الرسالة. تأكد من صلاحيات البوت.\nالخطأ: {e}")
+        await event.reply(f"❌ فشل إعادة توجيه الرسالة. تأكد من صلاحيات البوت.\nالخطأ: {e}")
         
 
+# ----------------------------------------------------------------------
+# --- دالة التشغيل الرئيسية ---
+# ----------------------------------------------------------------------
 async def main():
     if not BOT_TOKEN or not API_ID or not API_HASH:
         raise ValueError("يجب تحديد BOT_TOKEN, API_ID, و API_HASH كمتغيرات بيئة في Railway.")
