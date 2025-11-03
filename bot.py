@@ -11,8 +11,8 @@ from telethon.errors.rpcerrorlist import ChatAdminRequiredError, PeerIdInvalidEr
 
 # --- إعدادات البوت والثوابت ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-API_ID = os.getenv("API_ID")    # 🚨 متغير جديد
-API_HASH = os.getenv("API_HASH") # 🚨 متغير جديد
+API_ID = os.getenv("API_ID")    
+API_HASH = os.getenv("API_HASH") 
 
 # V17.0: معرف القناة المحددة
 CHANNEL_ID = "@books921383837" 
@@ -28,12 +28,12 @@ telethon_client = None
 async def search_telethon_channel(query: str):
     
     if telethon_client is None:
-        raise Exception("Telethon client not initialized.")
+        # لا ينبغي أن يحدث هذا إذا تم التشغيل بشكل صحيح
+        return "ERROR_CLIENT_UNINITIALIZED"
     
     results = []
     
     try:
-        # البحث باستخدام Telethon: يرسل طلب البحث مباشرة لـ Telegram
         messages = await telethon_client.get_messages(
             CHANNEL_ID,
             search=query,
@@ -41,7 +41,6 @@ async def search_telethon_channel(query: str):
         )
         
         for msg in messages:
-            # نتجاهل الرسائل النصية البحتة
             if msg and (msg.file or msg.photo or msg.video):
                 message_text = msg.text if msg.text else "رسالة بدون عنوان"
                 
@@ -51,10 +50,8 @@ async def search_telethon_channel(query: str):
                 })
 
     except ChatAdminRequiredError:
-        print("Telethon Error: البوت ليس مشرفاً في القناة.")
         return "ERROR_ADMIN_REQUIRED"
     except PeerIdInvalidError:
-        print("Telethon Error: معرف القناة غير صالح.")
         return "ERROR_INVALID_ID"
     except Exception as e:
         print(f"Telethon general search error: {e}")
@@ -64,8 +61,9 @@ async def search_telethon_channel(query: str):
 
 
 # ----------------------------------------------------------------------
-# --- دالة Callback (إعادة توجيه الرسالة) ---
+# --- دالة Callback وبقية الأوامر (بدون تغيير) ---
 # ----------------------------------------------------------------------
+
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -85,7 +83,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("✅ جارٍ إرسال الكتاب...")
         
         try:
-            # استخدام دالة forward_message في PTB لإعادة التوجيه
             await context.bot.forward_message(
                 chat_id=chat_id,
                 from_chat_id=CHANNEL_ID, 
@@ -96,10 +93,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             await context.bot.send_message(chat_id=chat_id, text=f"❌ فشل إعادة توجيه الرسالة. تأكد من أن البوت مشرف في القناة.\nالخطأ: {e}")
 
-
-# ----------------------------------------------------------------------
-# --- دوال تيليجرام الرئيسية (start، search_cmd، main) ---
-# ----------------------------------------------------------------------
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -116,7 +109,6 @@ async def search_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text(f"🔍 أبحث عن **{query}** داخل المكتبة المحددة...")
     
     try:
-        # 💥 V18.0: استخدام دالة Telethon للبحث
         results = await search_telethon_channel(query)
 
         if isinstance(results, str) and results.startswith("ERROR_"):
@@ -124,6 +116,8 @@ async def search_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                   await msg.edit_text("❌ خطأ: البوت ليس مشرفاً (Admin) في القناة المحددة.")
              elif results == "ERROR_INVALID_ID":
                  await msg.edit_text("❌ خطأ: معرف القناة غير صالح. تأكد من صحة @channelusername.")
+             elif results == "ERROR_CLIENT_UNINITIALIZED":
+                 await msg.edit_text("❌ خطأ تهيئة: فشل بدء تشغيل Telethon. تأكد من صحة API_ID/HASH.")
              else:
                   await msg.edit_text(f"⚠️ خطأ عام أثناء البحث: {results}")
              return
@@ -148,18 +142,22 @@ async def search_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
          await msg.edit_text(f"⚠️ حدث خطأ أثناء التشغيل: {e}")
 
+# ----------------------------------------------------------------------
+# --- دالة التشغيل الرئيسية (V18.2: تصحيح run_polling) ---
+# ----------------------------------------------------------------------
 async def main():
     if not BOT_TOKEN or not API_ID or not API_HASH:
         raise ValueError("يجب تحديد BOT_TOKEN, API_ID, و API_HASH كمتغيرات بيئة.")
 
-    # 💥 V18.0: تهيئة Telethon
     global telethon_client
+    # إنشاء وربط Telethon بحلقة الحدث الحالية
     telethon_client = TelegramClient('bot_session', int(API_ID), API_HASH)
     
     try:
         await telethon_client.start(bot_token=BOT_TOKEN)
+        print("Telethon client started successfully.")
     except Exception as e:
-         raise Exception(f"فشل تشغيل Telethon: {e}")
+         raise Exception(f"فشل تشغيل Telethon. تحقق من API_ID و API_HASH: {e}")
 
     # تهيئة PTB
     app = ApplicationBuilder().token(BOT_TOKEN).build()
@@ -168,13 +166,22 @@ async def main():
     app.add_handler(CommandHandler("search", search_cmd))
     app.add_handler(CallbackQueryHandler(callback_handler))
 
-    print("البوت بدأ العمل باستخدام Telethon.")
-    # تشغيل PTB في حلقة الحدث الحالية
-    await app.run_until_terminated()
-
+    print("PTB is starting polling...")
+    # 💥 V18.2: العودة إلى run_polling() المتوفرة في الإصدارات القديمة لديك.
+    # بما أننا داخل دالة async، سنستخدم وظيفة asyncio.get_event_loop() لتشغيلها.
+    # Note: run_polling is blocking, running it inside a future.
+    loop = asyncio.get_event_loop()
+    loop.run_in_executor(None, app.run_polling)
+    
+    # لجعل حلقة الأحداث مستمرة حتى تعمل polling
+    while True:
+        await asyncio.sleep(60) 
 
 if __name__ == "__main__":
     try:
+        # 🚨 V18.2: نقوم بتشغيل الدالة main غير المتزامنة
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
+    except Exception as e:
+        print(f"Fatal error outside main: {e}")
