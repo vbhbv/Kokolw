@@ -1,7 +1,9 @@
 import os
 import asyncio
 from telethon import TelegramClient, events
-from telethon.tl.types import ReplyInlineMarkup, InlineKeyboardButton
+# 💥 V19.1: تم تصحيح الاستيراد ليصبح مباشرة من telethon.tl.types أو telethon.tl.custom
+# سنستخدم طريقة الاستيراد الأكثر شيوعًا وندمج بعض العناصر المفقودة.
+from telethon.tl.custom import Button
 from telethon.errors.rpcerrorlist import ChatAdminRequiredError, PeerIdInvalidError, MessageNotModifiedError
 
 # --- إعدادات البوت والثوابت ---
@@ -13,7 +15,6 @@ API_HASH = os.getenv("API_HASH")
 CHANNEL_ID = "@books921383837" 
 
 # تهيئة العميل
-# نستخدم اسم البوت (البادئة) كاسم للجلسة
 bot = TelegramClient('bot_session', int(API_ID), API_HASH)
 
 # ----------------------------------------------------------------------
@@ -31,7 +32,6 @@ async def search_channel(client, query):
         )
         
         for msg in messages:
-            # نتجاهل الرسائل النصية البحتة
             if msg and (msg.file or msg.photo or msg.video):
                 message_text = msg.text if msg.text else "رسالة بدون عنوان"
                 
@@ -94,11 +94,12 @@ async def handle_search(event):
     for i, item in enumerate(results, start=0):
         title = item.get("title")
         text_lines.append(f"{i+1}. {title}")
-        # استخدام صيغة callback_data لـ Telethon
-        buttons.append([InlineKeyboardButton(f"📥 تحميل {i+1}", data=f"dl|{item['message_id']}")]) 
+        # 💥 V19.1: استخدام Button من telethon.tl.custom
+        buttons.append([Button.inline(f"📥 تحميل {i+1}", data=f"dl|{item['message_id']}")]) 
 
     reply_text = "✅ تم العثور على الكتب التالية:\n" + "\n".join(text_lines)
     
+    # Telethon يسمح بتمرير مصفوفة الأزرار مباشرة
     await msg.edit(reply_text, buttons=buttons, parse_mode='markdown')
 
 
@@ -146,9 +147,8 @@ async def main():
     
     # Telethon client start
     try:
-        # يجب تمرير bot_token ليتصل كبوت، وليس كمستخدم عادي
         await bot.start(bot_token=BOT_TOKEN)
-        await bot.run_until_disconnected() # تشغيل حتى يتم إيقافه
+        await bot.run_until_disconnected() 
         
     except Exception as e:
          print(f"فشل تشغيل Telethon. تأكد من صحة API_ID/HASH/BOT_TOKEN: {e}")
