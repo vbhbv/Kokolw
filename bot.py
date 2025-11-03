@@ -5,57 +5,62 @@ from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandle
 from telegram.constants import ParseMode
 from telegram import error as TelegramError
 
+# Telethon Imports
+from telethon import TelegramClient
+from telethon.errors.rpcerrorlist import ChatAdminRequiredError, PeerIdInvalidError
+
 # --- إعدادات البوت والثوابت ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+API_ID = os.getenv("API_ID")    # 🚨 متغير جديد
+API_HASH = os.getenv("API_HASH") # 🚨 متغير جديد
 
 # V17.0: معرف القناة المحددة
 CHANNEL_ID = "@books921383837" 
 
-TEMP_RESULTS_KEY = "current_search_results" 
+TEMP_RESULTS_KEY = "current_search_results"
 
+# تهيئة عميل Telethon (سيتم تهيئته في دالة main)
+telethon_client = None
 
 # ----------------------------------------------------------------------
-# --- دالة البحث داخل القناة (V17.4: الرجوع لاسم الدالة القديم) ---
+# --- دالة البحث بواسطة Telethon (V18.0) ---
 # ----------------------------------------------------------------------
-async def search_telegram_channel(context, chat_id, query: str):
+async def search_telethon_channel(query: str):
     
-    if not CHANNEL_ID or CHANNEL_ID == "YOUR_CHANNEL_ID":
-        await context.bot.send_message(chat_id=chat_id, text="❌ **خطأ الإعداد:** الرجاء تحديد `CHANNEL_ID` في الكود.")
-        return []
-
+    if telethon_client is None:
+        raise Exception("Telethon client not initialized.")
+    
+    results = []
+    
     try:
-        # 💥 V17.4: الرجوع إلى اسم الدالة القديم search_messages كحل أخير لخطأ البيئة.
-        messages = await context.bot.search_messages(
-            chat_id=CHANNEL_ID,
-            text=query, # نستخدم text بدلاً من query في الدوال القديمة
+        # البحث باستخدام Telethon: يرسل طلب البحث مباشرة لـ Telegram
+        messages = await telethon_client.get_messages(
+            CHANNEL_ID,
+            search=query,
             limit=5  
         )
         
-        # تحويل الرسائل إلى قائمة نتائج مبسطة
-        results = []
         for msg in messages:
-            # نتجاهل الرسائل التي ليس لها وثيقة/صورة/كتاب
-            if msg.document or msg.photo or msg.video:
-                message_text = msg.caption if msg.caption else (msg.text if msg.text else "رسالة بدون عنوان")
+            # نتجاهل الرسائل النصية البحتة
+            if msg and (msg.file or msg.photo or msg.video):
+                message_text = msg.text if msg.text else "رسالة بدون عنوان"
+                
                 results.append({
-                    "message_id": msg.message_id, 
+                    "message_id": msg.id, 
                     "title": message_text[:100].replace('\n', ' ')
                 })
 
-        return results
-        
-    except TelegramError.BadRequest as e:
-        if "Bad Request: chat not found" in str(e):
-             await context.bot.send_message(chat_id=chat_id, text="❌ خطأ: لم يتم العثور على القناة. تأكد من أن البوت مشرف وأن `CHANNEL_ID` صحيح.")
-        elif "Bad Request: message is not modified" in str(e):
-             pass
-        else:
-            await context.bot.send_message(chat_id=chat_id, text=f"❌ خطأ تيليجرام: {e}")
-        return []
+    except ChatAdminRequiredError:
+        print("Telethon Error: البوت ليس مشرفاً في القناة.")
+        return "ERROR_ADMIN_REQUIRED"
+    except PeerIdInvalidError:
+        print("Telethon Error: معرف القناة غير صالح.")
+        return "ERROR_INVALID_ID"
     except Exception as e:
-        # إذا استمر الخطأ حتى بعد هذا التغيير، فالمشكلة بيئية بحتة.
-        await context.bot.send_message(chat_id=chat_id, text=f"⚠️ خطأ عام أثناء البحث: {e}")
-        return []
+        print(f"Telethon general search error: {e}")
+        return f"ERROR_GENERAL:{e}"
+
+    return results
 
 
 # ----------------------------------------------------------------------
@@ -80,6 +85,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("✅ جارٍ إرسال الكتاب...")
         
         try:
+            # استخدام دالة forward_message في PTB لإعادة التوجيه
             await context.bot.forward_message(
                 chat_id=chat_id,
                 from_chat_id=CHANNEL_ID, 
@@ -110,7 +116,17 @@ async def search_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text(f"🔍 أبحث عن **{query}** داخل المكتبة المحددة...")
     
     try:
-        results = await search_telegram_channel(context, update.message.chat_id, query)
+        # 💥 V18.0: استخدام دالة Telethon للبحث
+        results = await search_telethon_channel(query)
+
+        if isinstance(results, str) and results.startswith("ERROR_"):
+             if results == "ERROR_ADMIN_REQUIRED":
+                  await msg.edit_text("❌ خطأ: البوت ليس مشرفاً (Admin) في القناة المحددة.")
+             elif results == "ERROR_INVALID_ID":
+                 await msg.edit_text("❌ خطأ: معرف القناة غير صالح. تأكد من صحة @channelusername.")
+             else:
+                  await msg.edit_text(f"⚠️ خطأ عام أثناء البحث: {results}")
+             return
 
         if not results:
             await msg.edit_text("❌ لم يتم العثور على نتائج في المكتبة الداخلية. حاول بكلمات مختلفة.")
@@ -130,20 +146,35 @@ async def search_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(reply, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(buttons))
         
     except Exception as e:
-         await msg.edit_text(f"⚠️ حدث خطأ أثناء البحث: {e}")
+         await msg.edit_text(f"⚠️ حدث خطأ أثناء التشغيل: {e}")
 
-def main():
-    if not BOT_TOKEN:
-        raise ValueError("BOT_TOKEN is missing in environment variables.")
+async def main():
+    if not BOT_TOKEN or not API_ID or not API_HASH:
+        raise ValueError("يجب تحديد BOT_TOKEN, API_ID, و API_HASH كمتغيرات بيئة.")
 
+    # 💥 V18.0: تهيئة Telethon
+    global telethon_client
+    telethon_client = TelegramClient('bot_session', int(API_ID), API_HASH)
+    
+    try:
+        await telethon_client.start(bot_token=BOT_TOKEN)
+    except Exception as e:
+         raise Exception(f"فشل تشغيل Telethon: {e}")
+
+    # تهيئة PTB
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("search", search_cmd))
     app.add_handler(CallbackQueryHandler(callback_handler))
 
-    print("البوت بدأ العمل.")
-    app.run_polling()
+    print("البوت بدأ العمل باستخدام Telethon.")
+    # تشغيل PTB في حلقة الحدث الحالية
+    await app.run_until_terminated()
+
 
 if __name__ == "__main__":
-    main()
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass
