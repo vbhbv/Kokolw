@@ -1,46 +1,37 @@
 import os
 import asyncio
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes 
-from telegram.constants import ParseMode
-from telegram import error as TelegramError
-
-# Telethon Imports
-from telethon import TelegramClient
-from telethon.errors.rpcerrorlist import ChatAdminRequiredError, PeerIdInvalidError
+from telethon import TelegramClient, events
+from telethon.tl.types import ReplyInlineMarkup, InlineKeyboardButton
+from telethon.errors.rpcerrorlist import ChatAdminRequiredError, PeerIdInvalidError, MessageNotModifiedError
 
 # --- إعدادات البوت والثوابت ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-API_ID = os.getenv("API_ID")    
-API_HASH = os.getenv("API_HASH") 
+API_ID = os.getenv("API_ID")
+API_HASH = os.getenv("API_HASH")
 
-# V17.0: معرف القناة المحددة
+# معرف القناة المحددة
 CHANNEL_ID = "@books921383837" 
 
-TEMP_RESULTS_KEY = "current_search_results"
-
-# تهيئة عميل Telethon (سيتم تهيئته في دالة main)
-telethon_client = None
+# تهيئة العميل
+# نستخدم اسم البوت (البادئة) كاسم للجلسة
+bot = TelegramClient('bot_session', int(API_ID), API_HASH)
 
 # ----------------------------------------------------------------------
-# --- دالة البحث بواسطة Telethon (V18.0) ---
+# --- دالة البحث (Telethon) ---
 # ----------------------------------------------------------------------
-async def search_telethon_channel(query: str):
-    
-    if telethon_client is None:
-        # لا ينبغي أن يحدث هذا إذا تم التشغيل بشكل صحيح
-        return "ERROR_CLIENT_UNINITIALIZED"
+async def search_channel(client, query):
     
     results = []
     
     try:
-        messages = await telethon_client.get_messages(
+        messages = await client.get_messages(
             CHANNEL_ID,
             search=query,
             limit=5  
         )
         
         for msg in messages:
+            # نتجاهل الرسائل النصية البحتة
             if msg and (msg.file or msg.photo or msg.video):
                 message_text = msg.text if msg.text else "رسالة بدون عنوان"
                 
@@ -59,129 +50,111 @@ async def search_telethon_channel(query: str):
 
     return results
 
-
 # ----------------------------------------------------------------------
-# --- دالة Callback وبقية الأوامر (بدون تغيير) ---
+# --- معالج أمر /start ---
 # ----------------------------------------------------------------------
-
-async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data = query.data
-    chat_id = query.message.chat_id
-    
-    if data.startswith("dl|"):
-        try:
-            index_str = data.split("|", 1)[1]
-            index = int(index_str)
-            message_id_to_forward = context.user_data[TEMP_RESULTS_KEY][index]["message_id"]
-
-        except Exception:
-            await context.bot.send_message(chat_id=chat_id, text="⚠️ حدث خطأ أثناء معالجة زر التحميل (نتيجة غير صالحة).")
-            return
-            
-        await query.edit_message_text("✅ جارٍ إرسال الكتاب...")
-        
-        try:
-            await context.bot.forward_message(
-                chat_id=chat_id,
-                from_chat_id=CHANNEL_ID, 
-                message_id=message_id_to_forward 
-            )
-            await query.message.delete()
-            
-        except Exception as e:
-            await context.bot.send_message(chat_id=chat_id, text=f"❌ فشل إعادة توجيه الرسالة. تأكد من أن البوت مشرف في القناة.\nالخطأ: {e}")
-
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
+@bot.on(events.NewMessage(pattern='/start'))
+async def handle_start(event):
+    await event.reply(
         "📚 بوت المكتبة الداخلية جاهز!\n"
         "أرسل /search متبوعًا باسم الكتاب للبحث داخل قناة المكتبة المحددة."
     )
 
-async def search_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = " ".join(context.args).strip()
+# ----------------------------------------------------------------------
+# --- معالج أمر /search ---
+# ----------------------------------------------------------------------
+@bot.on(events.NewMessage(pattern='/search (.+)'))
+async def handle_search(event):
+    query = event.pattern_match.group(1).strip()
+
     if not query:
-        await update.message.reply_text("استخدم: /search اسم الكتاب أو المؤلف")
+        await event.reply("استخدم: /search اسم الكتاب أو المؤلف")
+        return
+        
+    msg = await event.reply(f"🔍 أبحث عن **{query}** داخل المكتبة المحددة...")
+    
+    results = await search_channel(bot, query)
+
+    if isinstance(results, str) and results.startswith("ERROR_"):
+         error_map = {
+             "ERROR_ADMIN_REQUIRED": "❌ خطأ: البوت ليس مشرفاً (Admin) في القناة المحددة.",
+             "ERROR_INVALID_ID": "❌ خطأ: معرف القناة غير صالح. تأكد من صحة @channelusername."
+         }
+         await msg.edit(error_map.get(results, f"⚠️ خطأ عام أثناء البحث: {results}"))
+         return
+
+    if not results:
+        await msg.edit("❌ لم يتم العثور على نتائج في المكتبة الداخلية. حاول بكلمات مختلفة.")
         return
 
-    msg = await update.message.reply_text(f"🔍 أبحث عن **{query}** داخل المكتبة المحددة...")
+    # بناء الأزرار والرد
+    buttons = []
+    text_lines = []
     
-    try:
-        results = await search_telethon_channel(query)
+    for i, item in enumerate(results, start=0):
+        title = item.get("title")
+        text_lines.append(f"{i+1}. {title}")
+        # استخدام صيغة callback_data لـ Telethon
+        buttons.append([InlineKeyboardButton(f"📥 تحميل {i+1}", data=f"dl|{item['message_id']}")]) 
 
-        if isinstance(results, str) and results.startswith("ERROR_"):
-             if results == "ERROR_ADMIN_REQUIRED":
-                  await msg.edit_text("❌ خطأ: البوت ليس مشرفاً (Admin) في القناة المحددة.")
-             elif results == "ERROR_INVALID_ID":
-                 await msg.edit_text("❌ خطأ: معرف القناة غير صالح. تأكد من صحة @channelusername.")
-             elif results == "ERROR_CLIENT_UNINITIALIZED":
-                 await msg.edit_text("❌ خطأ تهيئة: فشل بدء تشغيل Telethon. تأكد من صحة API_ID/HASH.")
-             else:
-                  await msg.edit_text(f"⚠️ خطأ عام أثناء البحث: {results}")
-             return
+    reply_text = "✅ تم العثور على الكتب التالية:\n" + "\n".join(text_lines)
+    
+    await msg.edit(reply_text, buttons=buttons, parse_mode='markdown')
 
-        if not results:
-            await msg.edit_text("❌ لم يتم العثور على نتائج في المكتبة الداخلية. حاول بكلمات مختلفة.")
-            return
-
-        buttons = []
-        text_lines = []
-        
-        context.user_data[TEMP_RESULTS_KEY] = results
-        
-        for i, item in enumerate(results, start=0):
-            title = item.get("title")
-            text_lines.append(f"{i+1}. {title}")
-            buttons.append([InlineKeyboardButton(f"📥 تحميل {i+1}", callback_data=f"dl|{i}")])
-            
-        reply = "✅ تم العثور على الكتب التالية:\n" + "\n".join(text_lines)
-        await msg.edit_text(reply, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(buttons))
-        
-    except Exception as e:
-         await msg.edit_text(f"⚠️ حدث خطأ أثناء التشغيل: {e}")
 
 # ----------------------------------------------------------------------
-# --- دالة التشغيل الرئيسية (V18.2: تصحيح run_polling) ---
+# --- معالج أزرار التحميل (Callback) ---
+# ----------------------------------------------------------------------
+@bot.on(events.CallbackQuery(data=lambda d: d.startswith(b'dl|')))
+async def handle_callback(event):
+    
+    data = event.data.decode('utf-8')
+    try:
+        # استخراج message_id مباشرة من الـ callback data
+        message_id_to_forward = int(data.split('|')[1])
+    except:
+        await event.answer("⚠️ بيانات تحميل غير صالحة.")
+        return
+
+    try:
+        await event.edit("✅ جارٍ إرسال الكتاب...")
+    except MessageNotModifiedError:
+        pass # تجاهل إذا لم تتغير الرسالة
+
+    try:
+        # Telethon: إعادة توجيه الرسالة
+        await bot.forward_messages(
+            event.chat_id, 
+            message_id_to_forward, 
+            CHANNEL_ID
+        )
+        # حذف رسالة "جارٍ الإرسال"
+        await event.delete() 
+        
+    except Exception as e:
+        await event.respond(f"❌ فشل إعادة توجيه الرسالة. تأكد من صلاحيات البوت.\nالخطأ: {e}")
+        
+
+# ----------------------------------------------------------------------
+# --- دالة التشغيل الرئيسية ---
 # ----------------------------------------------------------------------
 async def main():
     if not BOT_TOKEN or not API_ID or not API_HASH:
-        raise ValueError("يجب تحديد BOT_TOKEN, API_ID, و API_HASH كمتغيرات بيئة.")
+        raise ValueError("يجب تحديد BOT_TOKEN, API_ID, و API_HASH كمتغيرات بيئة في Railway.")
 
-    global telethon_client
-    # إنشاء وربط Telethon بحلقة الحدث الحالية
-    telethon_client = TelegramClient('bot_session', int(API_ID), API_HASH)
+    print("البوت بدأ العمل باستخدام Telethon.")
     
+    # Telethon client start
     try:
-        await telethon_client.start(bot_token=BOT_TOKEN)
-        print("Telethon client started successfully.")
+        # يجب تمرير bot_token ليتصل كبوت، وليس كمستخدم عادي
+        await bot.start(bot_token=BOT_TOKEN)
+        await bot.run_until_disconnected() # تشغيل حتى يتم إيقافه
+        
     except Exception as e:
-         raise Exception(f"فشل تشغيل Telethon. تحقق من API_ID و API_HASH: {e}")
-
-    # تهيئة PTB
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("search", search_cmd))
-    app.add_handler(CallbackQueryHandler(callback_handler))
-
-    print("PTB is starting polling...")
-    # 💥 V18.2: العودة إلى run_polling() المتوفرة في الإصدارات القديمة لديك.
-    # بما أننا داخل دالة async، سنستخدم وظيفة asyncio.get_event_loop() لتشغيلها.
-    # Note: run_polling is blocking, running it inside a future.
-    loop = asyncio.get_event_loop()
-    loop.run_in_executor(None, app.run_polling)
-    
-    # لجعل حلقة الأحداث مستمرة حتى تعمل polling
-    while True:
-        await asyncio.sleep(60) 
+         print(f"فشل تشغيل Telethon. تأكد من صحة API_ID/HASH/BOT_TOKEN: {e}")
 
 if __name__ == "__main__":
     try:
-        # 🚨 V18.2: نقوم بتشغيل الدالة main غير المتزامنة
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
-    except Exception as e:
-        print(f"Fatal error outside main: {e}")
